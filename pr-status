@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# pr-status — quick overview of PRs needing attention
+# Usage: pr-status [org1,org2,...]
+#   e.g. pr-status my-org
+#   e.g. pr-status org-a,org-b
+set -euo pipefail
+CONFIG="${HOME}/.config/pr-status/config"
+# Read config file
+CONFIG_ORGS=""
+MAX_AGE_DAYS=21
+TEAMMATES=()
+if [ -f "$CONFIG" ]; then
+  in_teammates=false
+  while IFS= read -r line; do
+    line="${line%%#*}"          # strip comments
+    line="${line// /}"          # strip spaces
+    [ -z "$line" ] && continue
+    if [[ "$line" == "[teammates]" ]]; then
+      in_teammates=true; continue
+    elif [[ "$line" == "["* ]]; then
+      in_teammates=false; continue
+    fi
+    if $in_teammates; then
+      TEAMMATES+=("$line")
+    elif [[ "$line" == orgs=* ]]; then
+      CONFIG_ORGS="${line#orgs=}"
+    elif [[ "$line" == max_age_days=* ]]; then
+      MAX_AGE_DAYS="${line#max_age_days=}"
+    fi
+  done < "$CONFIG"
+fi
+MODE="terminal"
+POS_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --json) MODE="json" ;;
+    *) POS_ARGS+=("$arg") ;;
+  esac
+done
+ORGS="${POS_ARGS[0]:-$CONFIG_ORGS}"
+ME="$(gh api user -q .login)"
+# Colors
+BOLD='\033[1m'
+DIM='\033[2m'
+CYAN='\033[36m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+RED='\033[31m'
+MAGENTA='\033[35m'
+RESET='\033[0m'
+link() {
+  # OSC 8 hyperlink: \e]8;;URL\e\\TEXT\e]8;;\e\\
+  printf '\e]8;;%s\e\\%s\e]8;;\e\\' "$1" "$2"
+}
+age_str() {
+  local ts="$1"
+  local now age
+  now=$(date +%s)
+  if command -v gdate &>/dev/null; then
+    age=$(( (now - $(gdate -d "$ts" +%s)) / 3600 ))
+  elif date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s &>/dev/null 2>&1; then
+    age=$(( (now - $(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s)) / 3600 ))
+  elif date -d "$ts" +%s &>/dev/null 2>&1; then
+    age=$(( (now - $(date -d "$ts" +%s)) / 3600 ))
+  else
+    echo ""; return
+  fi
+  if [ "$age" -lt 24 ]; then
+    echo "${age}h ago"
+  else
+    echo "$(( age / 24 ))d ago"
+  fi
+}
+review_icon() {
+  case "$1" in
+    APPROVED)           echo -e "${GREEN}✓ approved${RESET}" ;;
+    CHANGES_REQUESTED)  echo -e "${RED}✕ changes${RESET}" ;;
+    COMMENTED)          echo -e "${YELLOW}● commented${RESET}" ;;
+    *)                  echo -e "${DIM}○ pending${RESET}" ;;
+  esac
+}
+divider() {
+  printf "${DIM}%.0s─${RESET}" {1..60}
+  echo
+}
+ci_rollup() {
+  # Print one of: success | failure | pending | none
+  local repo="$1" num="$2"
+  gh pr view "$num" --repo "$repo" --json statusCheckRollup --jq '
+    .statusCheckRollup
+    | if length == 0 then "none"
+      elif any(.[]; .conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE") then "failure"
+      elif any(.[]; .status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING" or .status == "WAITING") then "pending"
+      else "success" end
+  ' 2>/dev/null || echo "none"
+}
+ci_dot() {
+  case "$1" in
+    success) echo -e "${GREEN}●${RESET}" ;;
+    failure) echo -e "${RED}●${RESET}" ;;
+    pending) echo -e "${YELLOW}●${RESET}" ;;
+    *)       echo -e "${DIM}○${RESET}" ;;
+  esac
+}
+IFS=',' read -ra ORG_LIST <<< "$ORGS"
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+# Compute cutoff date for team stale filter
+if [ ${#TEAMMATES[@]} -gt 0 ]; then
+  if command -v gdate &>/dev/null; then
+    CUTOFF=$(gdate -d "-${MAX_AGE_DAYS} days" +%Y-%m-%d)
+  else
+    CUTOFF=$(date -v-${MAX_AGE_DAYS}d +%Y-%m-%d)
+  fi
+fi
+
+# ── Phase 1: fire all top-level fetches in parallel ─────
+for org in "${ORG_LIST[@]}"; do
+  (gh search prs --author="$ME" --owner="$org" --limit=100 \
+    --json repository --jq '[.[].repository.nameWithOwner] | unique' 2>/dev/null \
+    || echo "[]") > "$TMPDIR/active_${org}.json" &
+
+  (gh search prs --review-requested="$ME" --owner="$org" --state=open \
+    --sort=updated --limit=30 \
+    --json repository,number,title,author,createdAt,url 2>/dev/null \
+    || echo "[]") > "$TMPDIR/review_${org}.json" &
+
+  (gh search prs --author="$ME" --owner="$org" --state=open \
+    --sort=updated --limit=30 \
+    --json repository,number,title,updatedAt,url 2>/dev/null \
+    || echo "[]") > "$TMPDIR/mine_${org}.json" &
+done
+
+if [ ${#TEAMMATES[@]} -gt 0 ]; then
+  ti=0
+  for teammate in "${TEAMMATES[@]}"; do
+    for org in "${ORG_LIST[@]}"; do
+      ti=$((ti+1))
+      (gh search prs --author="$teammate" --owner="$org" --state=open \
+        --sort=updated --updated=">=${CUTOFF}" --limit=3 \
+        --json repository,number,title,author,createdAt,url 2>/dev/null \
+        || echo "[]") > "$TMPDIR/team_$(printf '%03d' $ti).json" &
+    done
+  done
+fi
+
+wait
+
+# ── Combine phase 1 results ─────────────────────────────
+ACTIVE_REPOS=$(cat "$TMPDIR"/active_*.json | jq -s 'add // [] | unique')
+REVIEW_RAW=$(cat "$TMPDIR"/review_*.json | jq -s 'add // []' | jq --argjson active "$ACTIVE_REPOS" '
+  [.[] | select(.repository.nameWithOwner as $r | $active | any(. == $r))]')
+MY_JSON=$(cat "$TMPDIR"/mine_*.json | jq -s 'add // []')
+
+# ── Phase 2: secondary per-PR fetches in parallel ───────
+DIRECT_DIR="$TMPDIR/direct"; mkdir -p "$DIRECT_DIR"
+ri=0
+while IFS=$'\t' read -r full_repo num; do
+  [ -z "$full_repo" ] && continue
+  ri=$((ri+1))
+  RIDX=$(printf '%03d' "$ri")
+  (
+    if [ "$(gh api "repos/$full_repo/pulls/$num/requested_reviewers" \
+         --jq "[.users[].login | select(. == \"$ME\")] | length" 2>/dev/null || echo "0")" -gt 0 ]; then
+      CI=$(ci_rollup "$full_repo" "$num")
+      echo "$REVIEW_RAW" | jq --arg repo "$full_repo" --argjson num "$num" --arg ci "$CI" \
+        '.[] | select(.repository.nameWithOwner == $repo and .number == $num) | . + {ci_status: $ci}' \
+        > "$DIRECT_DIR/$RIDX.json"
+    fi
+  ) &
+done < <(echo "$REVIEW_RAW" | jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"')
+
+MINE_DIR="$TMPDIR/mine_enriched"; mkdir -p "$MINE_DIR"
+mi=0
+while IFS=$'\t' read -r full_repo num; do
+  [ -z "$full_repo" ] && continue
+  mi=$((mi+1))
+  MIDX=$(printf '%03d' "$mi")
+  (
+    REVIEWS=$(gh pr view "$num" --repo "$full_repo" --json reviews \
+      --jq '[.reviews[] | select(.state != "DISMISSED" and .state != "PENDING") | {author: .author.login, state: .state, at: .submittedAt}] | sort_by(.at) | reverse | unique_by(.author)' 2>/dev/null || echo "[]")
+    CI=$(ci_rollup "$full_repo" "$num")
+    echo "$MY_JSON" | jq --arg repo "$full_repo" --argjson num "$num" --argjson reviews "$REVIEWS" --arg ci "$CI" \
+      '.[] | select(.repository.nameWithOwner == $repo and .number == $num) | . + {reviews: $reviews, ci_status: $ci}' \
+      > "$MINE_DIR/$MIDX.json"
+  ) &
+done < <(echo "$MY_JSON" | jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"')
+
+TEAM_DIR="$TMPDIR/team_enriched"; mkdir -p "$TEAM_DIR"
+TEAM_RAW="[]"
+if compgen -G "$TMPDIR/team_*.json" > /dev/null; then
+  TEAM_RAW=$(cat "$TMPDIR"/team_*.json | jq -s 'add // []')
+fi
+ti2=0
+while IFS=$'\t' read -r full_repo num; do
+  [ -z "$full_repo" ] && continue
+  ti2=$((ti2+1))
+  TIDX=$(printf '%03d' "$ti2")
+  (
+    CI=$(ci_rollup "$full_repo" "$num")
+    echo "$TEAM_RAW" | jq --arg repo "$full_repo" --argjson num "$num" --arg ci "$CI" \
+      '.[] | select(.repository.nameWithOwner == $repo and .number == $num) | . + {ci_status: $ci}' \
+      > "$TEAM_DIR/$TIDX.json"
+  ) &
+done < <(echo "$TEAM_RAW" | jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"')
+
+wait
+
+# ── Combine phase 2 results ─────────────────────────────
+if compgen -G "$DIRECT_DIR/*.json" > /dev/null; then
+  REVIEW_JSON=$(cat "$DIRECT_DIR"/*.json | jq -s '.')
+else
+  REVIEW_JSON="[]"
+fi
+if compgen -G "$MINE_DIR/*.json" > /dev/null; then
+  MY_ENRICHED=$(cat "$MINE_DIR"/*.json | jq -s '.')
+else
+  MY_ENRICHED="[]"
+fi
+
+TEAM_JSON="[]"
+if compgen -G "$TEAM_DIR/*.json" > /dev/null; then
+  TEAM_JSON=$(cat "$TEAM_DIR"/*.json | jq -s 'sort_by(.createdAt) | reverse')
+fi
+
+REVIEW_COUNT=$(echo "$REVIEW_JSON" | jq 'length')
+MY_COUNT=$(echo "$MY_ENRICHED" | jq 'length')
+TEAM_COUNT=$(echo "$TEAM_JSON" | jq 'length')
+
+# ── JSON output mode ────────────────────────────────────
+if [ "$MODE" = "json" ]; then
+  jq -n \
+    --arg me "$ME" \
+    --arg orgs "$ORGS" \
+    --argjson review "$REVIEW_JSON" \
+    --argjson mine "$MY_ENRICHED" \
+    --argjson team "$TEAM_JSON" \
+    --argjson review_count "$REVIEW_COUNT" \
+    --argjson my_count "$MY_COUNT" \
+    --argjson team_count "$TEAM_COUNT" \
+    '{
+       me: $me,
+       orgs: $orgs,
+       review: $review,
+       mine: $mine,
+       team: $team,
+       counts: { review: $review_count, mine: $my_count, team: $team_count }
+     }'
+  exit 0
+fi
+
+# ── Render: Review Requests ─────────────────────────────
+echo
+echo -e "${BOLD}${CYAN}  🔍  WAITING FOR YOUR REVIEW${RESET}"
+divider
+if [ "$REVIEW_COUNT" -eq 0 ]; then
+  echo -e "  ${DIM}All clear — nothing to review ✨${RESET}"
+else
+  echo "$REVIEW_JSON" | jq -r '.[] | "\(.repository.name)\t#\(.number)\t\(.title)\t\(.author.login)\t\(.createdAt)\t\(.url)\t\(.ci_status // "none")"' | while IFS=$'\t' read -r repo num title author created url ci; do
+    printf "  ${CYAN}%-20s${RESET} ${DIM}%s${RESET} %s ${BOLD}%s${RESET}\n" "$repo" "$(link "$url" "$num")" "$(ci_dot "$ci")" "$title"
+    printf "  ${DIM}%-20s by %-15s %s${RESET}\n" "" "$author" "$(age_str "$created")"
+  done
+fi
+echo
+# ── Render: My Open PRs ─────────────────────────────────
+echo -e "${BOLD}${MAGENTA}  🛠️  YOUR OPEN PRs${RESET}"
+divider
+if [ "$MY_COUNT" -eq 0 ]; then
+  echo -e "  ${DIM}No open PRs right now${RESET}"
+else
+  echo "$MY_ENRICHED" | jq -c '.[]' | while IFS= read -r pr; do
+    repo=$(echo "$pr" | jq -r '.repository.name')
+    num=$(echo "$pr" | jq -r '.number')
+    title=$(echo "$pr" | jq -r '.title')
+    url=$(echo "$pr" | jq -r '.url')
+    ci=$(echo "$pr" | jq -r '.ci_status // "none"')
+    printf "  ${MAGENTA}%-20s${RESET} ${DIM}%s${RESET} %s ${BOLD}%s${RESET}\n" "$repo" "$(link "$url" "#$num")" "$(ci_dot "$ci")" "$title"
+    REVIEWS=$(echo "$pr" | jq '.reviews')
+    if [ "$(echo "$REVIEWS" | jq 'length')" -eq 0 ]; then
+      printf "  ${DIM}%-20s ○ no reviews yet${RESET}\n" ""
+    else
+      echo "$REVIEWS" | jq -r '.[] | "\(.author)\t\(.state)"' | while IFS=$'\t' read -r reviewer state; do
+        printf "  %-20s %s ${DIM}%s${RESET}\n" "" "$(review_icon "$state")" "$reviewer"
+      done
+    fi
+  done
+fi
+# ── Render: Team PRs ────────────────────────────────────
+if [ ${#TEAMMATES[@]} -gt 0 ]; then
+  echo
+  echo -e "${BOLD}${GREEN}  👥  TEAM${RESET}"
+  divider
+  if [ "$TEAM_COUNT" -eq 0 ]; then
+    echo -e "  ${DIM}No open PRs from teammates${RESET}"
+  else
+    last_author=""
+    echo "$TEAM_JSON" | jq -r '
+      group_by(.author.login)
+      | map({
+          author: .[0].author.login,
+          prs: (sort_by(.createdAt) | reverse),
+          newest: (map(.createdAt) | max)
+        })
+      | sort_by(.newest) | reverse
+      | .[] | .author as $a | .prs[]
+      | "\($a)\t\(.repository.name)\t\(.number)\t\(.title)\t\(.createdAt)\t\(.url)\t\(.ci_status // "none")"
+    ' | while IFS=$'\t' read -r author repo num title created url ci; do
+      if [ "$author" != "$last_author" ]; then
+        [ -n "$last_author" ] && echo
+        printf "  ${BOLD}${GREEN}@%s${RESET}\n" "$author"
+        last_author="$author"
+      fi
+      printf "    ${GREEN}%-22s${RESET} ${DIM}%s${RESET} %s ${BOLD}%s${RESET} ${DIM}%s${RESET}\n" "$repo" "$(link "$url" "#$num")" "$(ci_dot "$ci")" "$title" "$(age_str "$created")"
+    done
+  fi
+fi
+# ── Summary ──────────────────────────────────────────────
+echo
+divider
+printf "  ${CYAN}%s${RESET} to review  ${MAGENTA}%s${RESET} open PRs" "$REVIEW_COUNT" "$MY_COUNT"
+if [ ${#TEAMMATES[@]} -gt 0 ]; then
+  printf "  ${GREEN}%s${RESET} team PRs" "$TEAM_COUNT"
+fi
+echo -e "  ${DIM}@${ME} · ${ORGS}${RESET}"
+echo
