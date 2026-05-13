@@ -153,6 +153,41 @@ ACTIVE_REPOS=$(cat "$TMPDIR"/active_*.json | jq -s 'add // [] | unique')
 REVIEW_RAW=$(cat "$TMPDIR"/review_*.json | jq -s 'add // []' | jq --argjson active "$ACTIVE_REPOS" '
   [.[] | select(.repository.nameWithOwner as $r | $active | any(. == $r))]')
 MY_JSON=$(cat "$TMPDIR"/mine_*.json | jq -s 'add // []')
+TEAM_RAW="[]"
+if compgen -G "$TMPDIR/team_*.json" > /dev/null; then
+  TEAM_RAW=$(cat "$TMPDIR"/team_*.json | jq -s 'add // []')
+fi
+
+# ── Filter out archived repos ───────────────────────────
+ARCH_DIR="$TMPDIR/archived"; mkdir -p "$ARCH_DIR"
+UNIQUE_REPOS=$(jq -s -n \
+  --argjson r "$REVIEW_RAW" --argjson m "$MY_JSON" --argjson t "$TEAM_RAW" \
+  '[$r[], $m[], $t[]] | map(.repository.nameWithOwner) | unique | .[]' -r)
+ai=0
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+  ai=$((ai+1))
+  AIDX=$(printf '%03d' "$ai")
+  (
+    archived=$(gh api "repos/$repo" --jq '.archived' 2>/dev/null || echo "false")
+    if [ "$archived" = "true" ]; then
+      printf '%s\n' "$repo" > "$ARCH_DIR/$AIDX.txt"
+    fi
+  ) &
+done <<< "$UNIQUE_REPOS"
+wait
+
+ARCHIVED_REPOS="[]"
+if compgen -G "$ARCH_DIR/*.txt" > /dev/null; then
+  ARCHIVED_REPOS=$(cat "$ARCH_DIR"/*.txt | jq -R -s 'split("\n") | map(select(length > 0))')
+fi
+
+REVIEW_RAW=$(echo "$REVIEW_RAW" | jq --argjson arch "$ARCHIVED_REPOS" \
+  '[.[] | select(.repository.nameWithOwner as $r | $arch | any(. == $r) | not)]')
+MY_JSON=$(echo "$MY_JSON" | jq --argjson arch "$ARCHIVED_REPOS" \
+  '[.[] | select(.repository.nameWithOwner as $r | $arch | any(. == $r) | not)]')
+TEAM_RAW=$(echo "$TEAM_RAW" | jq --argjson arch "$ARCHIVED_REPOS" \
+  '[.[] | select(.repository.nameWithOwner as $r | $arch | any(. == $r) | not)]')
 
 # ── Phase 2: secondary per-PR fetches in parallel ───────
 DIRECT_DIR="$TMPDIR/direct"; mkdir -p "$DIRECT_DIR"
@@ -189,10 +224,6 @@ while IFS=$'\t' read -r full_repo num; do
 done < <(echo "$MY_JSON" | jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"')
 
 TEAM_DIR="$TMPDIR/team_enriched"; mkdir -p "$TEAM_DIR"
-TEAM_RAW="[]"
-if compgen -G "$TMPDIR/team_*.json" > /dev/null; then
-  TEAM_RAW=$(cat "$TMPDIR"/team_*.json | jq -s 'add // []')
-fi
 ti2=0
 while IFS=$'\t' read -r full_repo num; do
   [ -z "$full_repo" ] && continue
