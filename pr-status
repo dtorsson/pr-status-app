@@ -116,6 +116,13 @@ if [ ${#TEAMMATES[@]} -gt 0 ]; then
   fi
 fi
 
+# Discover teams user is member of, scoped to ORG_LIST.
+# Format: [{"org": "...", "slug": "..."}]
+USER_TEAMS_JSON=$(gh api /user/teams --paginate \
+  --jq '[.[] | {org: .organization.login, slug: .slug}]' 2>/dev/null || echo "[]")
+USER_TEAMS_JSON=$(echo "$USER_TEAMS_JSON" | jq --argjson orgs "$(printf '%s\n' "${ORG_LIST[@]}" | jq -R . | jq -s .)" \
+  '[.[] | select(.org as $o | $orgs | any(. == $o))]')
+
 # ── Phase 1: fire all top-level fetches in parallel ─────
 for org in "${ORG_LIST[@]}"; do
   (gh search prs --author="$ME" --owner="$org" --limit=100 \
@@ -132,6 +139,16 @@ for org in "${ORG_LIST[@]}"; do
     --json repository,number,title,updatedAt,url 2>/dev/null \
     || echo "[]") > "$TMPDIR/mine_${org}.json" &
 done
+
+# Team-tagged review requests: one search per (org, team) pair user belongs to.
+while IFS=$'\t' read -r torg tslug; do
+  [ -z "$torg" ] && continue
+  safe="${torg//[^A-Za-z0-9]/_}__${tslug//[^A-Za-z0-9]/_}"
+  (gh search prs --team-review-requested="${torg}/${tslug}" --owner="$torg" --state=open \
+    --sort=updated --limit=30 \
+    --json repository,number,title,author,createdAt,url 2>/dev/null \
+    || echo "[]") > "$TMPDIR/tagged_${safe}.json" &
+done < <(echo "$USER_TEAMS_JSON" | jq -r '.[] | "\(.org)\t\(.slug)"')
 
 if [ ${#TEAMMATES[@]} -gt 0 ]; then
   ti=0
@@ -150,8 +167,15 @@ wait
 
 # ── Combine phase 1 results ─────────────────────────────
 ACTIVE_REPOS=$(cat "$TMPDIR"/active_*.json | jq -s 'add // [] | unique')
-REVIEW_RAW=$(cat "$TMPDIR"/review_*.json | jq -s 'add // []' | jq --argjson active "$ACTIVE_REPOS" '
+REVIEW_PERSONAL=$(cat "$TMPDIR"/review_*.json | jq -s 'add // []' | jq --argjson active "$ACTIVE_REPOS" '
   [.[] | select(.repository.nameWithOwner as $r | $active | any(. == $r))]')
+TAGGED_RAW="[]"
+if compgen -G "$TMPDIR/tagged_*.json" > /dev/null; then
+  TAGGED_RAW=$(cat "$TMPDIR"/tagged_*.json | jq -s 'add // []')
+fi
+# Union personal + team-tagged review requests, dedupe by repo+number.
+REVIEW_RAW=$(jq -n --argjson p "$REVIEW_PERSONAL" --argjson t "$TAGGED_RAW" '
+  ($p + $t) | unique_by("\(.repository.nameWithOwner)#\(.number)")')
 MY_JSON=$(cat "$TMPDIR"/mine_*.json | jq -s 'add // []')
 TEAM_RAW="[]"
 if compgen -G "$TMPDIR/team_*.json" > /dev/null; then
@@ -197,8 +221,13 @@ while IFS=$'\t' read -r full_repo num; do
   ri=$((ri+1))
   RIDX=$(printf '%03d' "$ri")
   (
-    if [ "$(gh api "repos/$full_repo/pulls/$num/requested_reviewers" \
-         --jq "[.users[].login | select(. == \"$ME\")] | length" 2>/dev/null || echo "0")" -gt 0 ]; then
+    repo_owner="${full_repo%%/*}"
+    REQ_REVIEWERS=$(gh api "repos/$full_repo/pulls/$num/requested_reviewers" 2>/dev/null || echo '{}')
+    MATCH=$(echo "$REQ_REVIEWERS" | jq --arg me "$ME" --arg owner "$repo_owner" --argjson teams "$USER_TEAMS_JSON" '
+      ((.users // []) | any(.login == $me))
+      or ((.teams // []) | any(.slug as $s | $teams | any(.org == $owner and .slug == $s)))
+    ')
+    if [ "$MATCH" = "true" ]; then
       CI=$(ci_rollup "$full_repo" "$num")
       echo "$REVIEW_RAW" | jq --arg repo "$full_repo" --argjson num "$num" --arg ci "$CI" \
         '.[] | select(.repository.nameWithOwner == $repo and .number == $num) | . + {ci_status: $ci}' \
