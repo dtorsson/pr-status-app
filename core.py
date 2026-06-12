@@ -8,12 +8,6 @@ from pathlib import Path
 
 DEFAULT_POLL_INTERVAL = 300
 SCRIPT_TIMEOUT_SECONDS = 120
-PRESET_INTERVALS: list[tuple[int, str]] = [
-    (60, "1 min"),
-    (300, "5 min"),
-    (600, "10 min"),
-    (1800, "30 min"),
-]
 
 CONFIG_DIR = Path.home() / ".config" / "pr-status"
 PR_CONFIG_PATH = CONFIG_DIR / "config"
@@ -28,9 +22,13 @@ REVIEW_STATE_LABELS = {
 
 
 def script_path() -> Path:
-    """Locate pr-status script in dev (next to app.py) or bundled (Resources/)."""
+    """Locate pr-status script: bundled (RESOURCEPATH), else next to core.py."""
     here = Path(__file__).resolve().parent
-    candidates = [here / "pr-status", here.parent / "Resources" / "pr-status"]
+    candidates = []
+    rp = os.environ.get("RESOURCEPATH")
+    if rp:
+        candidates.append(Path(rp) / "pr-status")
+    candidates += [here / "pr-status", here.parent / "Resources" / "pr-status"]
     for c in candidates:
         if c.exists():
             return c
@@ -134,9 +132,13 @@ def subprocess_env() -> dict[str, str]:
 
 
 def ui_path() -> Path:
-    """Locate ui/ dir in dev (next to core.py) or bundled (Resources/ui)."""
+    """Locate ui/ dir: bundled (RESOURCEPATH), else next to core.py."""
     here = Path(__file__).resolve().parent
-    candidates = [here / "ui", here.parent / "Resources" / "ui"]
+    candidates = []
+    rp = os.environ.get("RESOURCEPATH")
+    if rp:
+        candidates.append(Path(rp) / "ui")
+    candidates += [here / "ui", here.parent / "Resources" / "ui"]
     for c in candidates:
         if c.exists():
             return c
@@ -174,8 +176,20 @@ def build_state(
     }
 
 
-def error_state(summary: str, detail: str) -> dict:
-    return {"ok": False, "error_summary": summary, "error_detail": detail}
+def error_state(
+    summary: str,
+    detail: str,
+    *,
+    last_refresh: str | None = None,
+    poll_interval_label: str | None = None,
+) -> dict:
+    return {
+        "ok": False,
+        "error_summary": summary,
+        "error_detail": detail,
+        "last_refresh": last_refresh,
+        "poll_interval_label": poll_interval_label,
+    }
 
 
 def compute_notifications(

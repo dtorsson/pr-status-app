@@ -239,7 +239,14 @@ class AppDelegate(NSObject):
     def _apply_error(self, summary: str, detail: str) -> None:
         self._fetching = False
         self._status_item.button().setTitle_("PR ⚠️")
-        self._render(core.error_state(summary, detail))
+        self._render(
+            core.error_state(
+                summary,
+                detail,
+                last_refresh=self._last_refresh,
+                poll_interval_label=core.format_interval(self._poll_interval),
+            )
+        )
 
     @objc.python_method
     def _open_url(self, url) -> None:
@@ -329,7 +336,7 @@ class AppDelegate(NSObject):
         webview = self._popover.contentViewController().view()
         webview.evaluateJavaScript_completionHandler_(js, None)
 
-    # ---------- notifications (Task 6 fills these in) ----------
+    # ---------- notifications ----------
 
     def userNotificationCenter_shouldPresentNotification_(self, _center, _note):
         return True

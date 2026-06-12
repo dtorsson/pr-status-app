@@ -66,6 +66,16 @@ def test_error_state_shape():
     assert state["ok"] is False
     assert state["error_summary"] == "Script timeout"
     assert state["error_detail"] == "line1\nline2"
+    assert state["last_refresh"] is None
+    assert state["poll_interval_label"] is None
+
+
+def test_error_state_keeps_footer_info():
+    state = core.error_state(
+        "Script timeout", "", last_refresh="12:36:40", poll_interval_label="5m"
+    )
+    assert state["last_refresh"] == "12:36:40"
+    assert state["poll_interval_label"] == "5m"
 
 
 def test_new_review_request_notifies():
@@ -130,3 +140,15 @@ def test_ui_path_prefers_existing_dir(monkeypatch, tmp_path):
     (tmp_path / "ui").mkdir()
     monkeypatch.setattr(core, "__file__", str(tmp_path / "core.py"))
     assert core.ui_path() == tmp_path / "ui"
+
+
+def test_ui_path_uses_resourcepath(monkeypatch, tmp_path):
+    (tmp_path / "ui").mkdir()
+    monkeypatch.setenv("RESOURCEPATH", str(tmp_path))
+    assert core.ui_path() == tmp_path / "ui"
+
+
+def test_script_path_uses_resourcepath(monkeypatch, tmp_path):
+    (tmp_path / "pr-status").write_text("#!/bin/bash\n")
+    monkeypatch.setenv("RESOURCEPATH", str(tmp_path))
+    assert core.script_path() == tmp_path / "pr-status"
