@@ -5,6 +5,7 @@ Pure logic lives in core.py. This file is AppKit plumbing only.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -256,6 +257,8 @@ class AppDelegate(NSObject):
             action = body.get("action")
         except AttributeError:
             return
+        if self._popover is None:
+            return
         if action == "ready":
             self._ui_ready = True
             if self._last_state is not None:
@@ -274,6 +277,8 @@ class AppDelegate(NSObject):
             try:
                 h = float(body.get("value", 0))
             except (TypeError, ValueError):
+                return
+            if not math.isfinite(h):
                 return
             h = max(POPOVER_MIN_HEIGHT, min(POPOVER_MAX_HEIGHT, h))
             self._popover.setContentSize_(NSMakeSize(POPOVER_WIDTH, h))
