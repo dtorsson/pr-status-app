@@ -243,7 +243,12 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _deliver_notification(self, note: dict) -> None:
-        pass  # Task 6
+        n = NSUserNotification.alloc().init()
+        n.setTitle_(note["title"])
+        n.setSubtitle_(note["subtitle"])
+        n.setInformativeText_(note["message"])
+        n.setUserInfo_({"url": note.get("url", "")})
+        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
 
     @objc.python_method
     def _save_settings(self, body) -> None:
@@ -305,6 +310,11 @@ class AppDelegate(NSObject):
 
     def userNotificationCenter_shouldPresentNotification_(self, _center, _note):
         return True
+
+    def userNotificationCenter_didActivateNotification_(self, _center, notification):
+        url = (notification.userInfo() or {}).get("url")
+        if url:
+            webbrowser.open(url)
 
 
 def main() -> None:
