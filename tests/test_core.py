@@ -118,3 +118,15 @@ def test_save_and_load_teammates_roundtrip(tmp_path):
     parsed = core.load_pr_config(cfg)
     assert parsed["teammates"] == ["alice", "bob"]
     assert "orgs=acme" in parsed["top"]
+
+
+def test_ui_path_falls_back_to_local(monkeypatch, tmp_path):
+    fake_core = tmp_path / "core.py"
+    monkeypatch.setattr(core, "__file__", str(fake_core))
+    assert core.ui_path() == tmp_path / "ui"
+
+
+def test_ui_path_prefers_existing_dir(monkeypatch, tmp_path):
+    (tmp_path / "ui").mkdir()
+    monkeypatch.setattr(core, "__file__", str(tmp_path / "core.py"))
+    assert core.ui_path() == tmp_path / "ui"
