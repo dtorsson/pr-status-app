@@ -46,6 +46,7 @@ header {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--green); display: inline-block;
 }
+.online-dot.offline { background: var(--gray); }
 .spacer { flex: 1; }
 .clock { color: var(--text-dim); font-size: 12px; }
 .icon-btn {

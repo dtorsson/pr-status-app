@@ -52,9 +52,14 @@ function sectionCard(icon, title, count, badgeCls) {
 }
 
 function render(s) {
+  tickClock();
   state = s;
-  $("view-settings").hidden = true;
-  $("view-main").hidden = false;
+  // Never yank the user out of settings on a background poll; only switch
+  // views when settings is not currently open. Settings fields are untouched.
+  if ($("view-settings").hidden) {
+    $("view-main").hidden = false;
+  }
+  document.querySelector(".online-dot").classList.toggle("offline", !s.ok);
   const cards = $("cards");
   cards.replaceChildren();
 
@@ -66,16 +71,19 @@ function render(s) {
   }
 
   const counts = s.counts ?? {};
+  const reviewPRs = s.review ?? [];
+  const minePRs = s.mine ?? [];
+  const teamPRs = s.team ?? [];
 
   const review = sectionCard("\u{1F50D}", "Waiting for your review",
     counts.review ?? 0, (counts.review ?? 0) > 0 ? "badge-warn" : "badge-ok");
-  if (!s.review.length) review.body.appendChild(el("div", "empty", "All clear ✨"));
-  for (const pr of s.review) review.body.appendChild(prRow(pr, { showAuthor: true }));
+  if (!reviewPRs.length) review.body.appendChild(el("div", "empty", "All clear ✨"));
+  for (const pr of reviewPRs) review.body.appendChild(prRow(pr, { showAuthor: true }));
   cards.appendChild(review.card);
 
   const mine = sectionCard("\u{1F6E0}", "Your open PRs", counts.mine ?? 0, "badge-neutral");
-  if (!s.mine.length) mine.body.appendChild(el("div", "empty", "No open PRs"));
-  for (const pr of s.mine) {
+  if (!minePRs.length) mine.body.appendChild(el("div", "empty", "No open PRs"));
+  for (const pr of minePRs) {
     mine.body.appendChild(prRow(pr));
     for (const r of pr.reviews ?? []) {
       const p = REVIEW_PILLS[r.state] ??
@@ -88,10 +96,10 @@ function render(s) {
   }
   cards.appendChild(mine.card);
 
-  if (s.team.length) {
+  if (teamPRs.length) {
     const team = sectionCard("\u{1F465}", "Team", counts.team ?? 0, "badge-neutral");
     let cur = null;
-    for (const pr of s.team) {
+    for (const pr of teamPRs) {
       const author = pr.author?.login ?? "?";
       if (author !== cur) {
         team.body.appendChild(el("div", "team-author mono", `@${author}`));
@@ -140,11 +148,23 @@ window.setRefreshing = setRefreshing;
 
 function reportHeight() {
   requestAnimationFrame(() => {
+    // `main` is flex:1 inside a 100vh column, so it stretches to fill the
+    // viewport — its scrollHeight tracks the current popover height and would
+    // only ever grow. Measure intrinsic content height instead: the children
+    // plus main's own vertical padding.
     const main = document.querySelector("main:not([hidden])");
+    const style = getComputedStyle(main);
+    let content = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    for (const child of main.children) {
+      const cs = getComputedStyle(child);
+      if (cs.display === "none") continue;
+      content += child.offsetHeight +
+        parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
+    }
     const h = document.querySelector("header").offsetHeight +
-      main.scrollHeight +
-      document.querySelector("footer").offsetHeight + 14;
-    post({ action: "height", value: h });
+      content +
+      document.querySelector("footer").offsetHeight;
+    post({ action: "height", value: Math.ceil(h) });
   });
 }
 
@@ -218,7 +238,15 @@ function showSettingsError(msg) {
   banner.hidden = false;
   reportHeight();
 }
-window.settingsError = (msg) => { openSettings(); showSettingsError(msg); };
+// Native rejected a save after we optimistically closed settings. Bring the
+// view back without repopulating fields — the user's typed values are still
+// in the DOM and must be preserved.
+window.settingsError = (msg) => {
+  $("view-main").hidden = true;
+  $("view-settings").hidden = false;
+  showSettingsError(msg);
+  reportHeight();
+};
 
 function saveSettings() {
   let secs = pendingInterval;
