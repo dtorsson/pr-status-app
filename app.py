@@ -242,13 +242,21 @@ class AppDelegate(NSObject):
         self._render(core.error_state(summary, detail))
 
     @objc.python_method
+    def _open_url(self, url) -> None:
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            webbrowser.open(url)
+
+    @objc.python_method
     def _deliver_notification(self, note: dict) -> None:
+        center = NSUserNotificationCenter.defaultUserNotificationCenter()
+        if center is None:
+            return
         n = NSUserNotification.alloc().init()
         n.setTitle_(note["title"])
         n.setSubtitle_(note["subtitle"])
         n.setInformativeText_(note["message"])
         n.setUserInfo_({"url": note.get("url", "")})
-        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
+        center.deliverNotification_(n)
 
     @objc.python_method
     def _save_settings(self, body) -> None:
@@ -270,9 +278,7 @@ class AppDelegate(NSObject):
                 self._render(self._last_state)
             self._push_js(f"window.setRefreshing({json.dumps(self._fetching)})")
         elif action == "openPR":
-            url = body.get("url")
-            if isinstance(url, str) and url.startswith(("https://", "http://")):
-                webbrowser.open(url)
+            self._open_url(body.get("url"))
             self._popover.close()
         elif action == "refresh":
             self.startFetch_(None)
@@ -312,9 +318,7 @@ class AppDelegate(NSObject):
         return True
 
     def userNotificationCenter_didActivateNotification_(self, _center, notification):
-        url = (notification.userInfo() or {}).get("url")
-        if url:
-            webbrowser.open(url)
+        self._open_url((notification.userInfo() or {}).get("url"))
 
 
 def main() -> None:
