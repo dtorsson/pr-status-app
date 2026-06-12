@@ -180,6 +180,14 @@ class AppDelegate(NSObject):
                 env=core.subprocess_env(),
             )
             data = json.loads(result.stdout)
+            if not isinstance(data, dict):
+                AppHelper.callAfter(
+                    self._apply_error,
+                    "Bad JSON from script",
+                    f"expected object, got {type(data).__name__}",
+                )
+                return
+            AppHelper.callAfter(self._apply_data, data)
         except subprocess.CalledProcessError as e:
             AppHelper.callAfter(
                 self._apply_error, f"Script failed (rc={e.returncode})", e.stderr or ""
@@ -188,13 +196,16 @@ class AppDelegate(NSObject):
         except subprocess.TimeoutExpired:
             AppHelper.callAfter(self._apply_error, "Script timeout", "")
             return
-        except FileNotFoundError as e:
-            AppHelper.callAfter(self._apply_error, "Script not found", str(e))
+        except OSError as e:
+            AppHelper.callAfter(
+                self._apply_error, "Script not found or not runnable", str(e)
+            )
             return
         except json.JSONDecodeError as e:
             AppHelper.callAfter(self._apply_error, "Bad JSON from script", str(e))
             return
-        AppHelper.callAfter(self._apply_data, data)
+        except Exception as e:
+            AppHelper.callAfter(self._apply_error, "Unexpected error", repr(e))
 
     @objc.python_method
     def _apply_data(self, data: dict) -> None:
@@ -204,11 +215,15 @@ class AppDelegate(NSObject):
         self._status_item.button().setTitle_(
             f"🔍 {counts.get('review', 0)}  🛠️ {counts.get('mine', 0)}"
         )
+        try:
+            teammates = core.load_pr_config()["teammates"]
+        except OSError:
+            teammates = []
         state = core.build_state(
             data,
             last_refresh=self._last_refresh,
             poll_interval=self._poll_interval,
-            teammates=core.load_pr_config()["teammates"],
+            teammates=teammates,
         )
         self._render(state)
         if not self._first_run:
@@ -241,6 +256,7 @@ class AppDelegate(NSObject):
             self._ui_ready = True
             if self._last_state is not None:
                 self._render(self._last_state)
+            self._push_js(f"window.setRefreshing({json.dumps(self._fetching)})")
         # Task 5 adds: openPR / refresh / quit / height / saveSettings
 
     @objc.python_method
