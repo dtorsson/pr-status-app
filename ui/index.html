@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="root">
+  <header>
+    <div class="glyph">P</div>
+    <div class="title">PR Status<span class="online-dot"></span></div>
+    <div class="spacer"></div>
+    <div id="clock" class="clock mono"></div>
+    <button id="gear" class="icon-btn" title="Settings">&#9881;</button>
+  </header>
+
+  <main id="view-main">
+    <div id="cards"><div class="empty">Loading…</div></div>
+  </main>
+
+  <main id="view-settings" hidden>
+    <section class="card">
+      <div class="card-header"><span class="card-title">Refresh every</span></div>
+      <div class="card-body">
+        <div class="pills" id="interval-pills"></div>
+        <input id="interval-custom" class="text-input mono"
+               placeholder="custom: 90s, 3m, 1h30m" spellcheck="false">
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-header"><span class="card-title">Teammates</span></div>
+      <div class="card-body">
+        <textarea id="teammates" class="text-input" rows="6"
+                  placeholder="one username per line" spellcheck="false"></textarea>
+        <div class="hint">Empty disables the Team section.</div>
+      </div>
+    </section>
+    <div id="settings-error" class="error-banner" hidden></div>
+    <div class="settings-actions">
+      <button id="settings-back" class="footer-btn">&#8249; Back</button>
+      <button id="settings-save" class="footer-btn primary">Save</button>
+    </div>
+    <div class="signin" id="signin"></div>
+  </main>
+
+  <footer>
+    <button id="refresh" class="footer-btn"><span id="refresh-icon">&#10227;</span> Refresh</button>
+    <div id="meta" class="meta mono"></div>
+    <button id="quit" class="footer-btn">Quit</button>
+  </footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
