@@ -260,7 +260,24 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _save_settings(self, body) -> None:
-        pass  # Task 7
+        try:
+            secs = max(10, int(body.get("poll_interval_seconds", self._poll_interval)))
+        except (TypeError, ValueError):
+            secs = self._poll_interval
+        teammates = [
+            str(t).strip() for t in (body.get("teammates") or []) if str(t).strip()
+        ]
+        self._poll_interval = secs
+        cfg = core.load_app_config()
+        cfg["poll_interval_seconds"] = secs
+        try:
+            core.save_app_config(cfg)
+            core.save_teammates(teammates)
+        except OSError as e:
+            self._push_js(f"window.settingsError({json.dumps(str(e))})")
+            return
+        self._restart_timer()
+        self.startFetch_(None)
 
     # ---------- JS bridge ----------
 
