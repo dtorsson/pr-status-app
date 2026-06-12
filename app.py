@@ -244,6 +244,10 @@ class AppDelegate(NSObject):
     def _deliver_notification(self, note: dict) -> None:
         pass  # Task 6
 
+    @objc.python_method
+    def _save_settings(self, body) -> None:
+        pass  # Task 7
+
     # ---------- JS bridge ----------
 
     def userContentController_didReceiveScriptMessage_(self, _ucc, message):
@@ -257,7 +261,24 @@ class AppDelegate(NSObject):
             if self._last_state is not None:
                 self._render(self._last_state)
             self._push_js(f"window.setRefreshing({json.dumps(self._fetching)})")
-        # Task 5 adds: openPR / refresh / quit / height / saveSettings
+        elif action == "openPR":
+            url = body.get("url")
+            if isinstance(url, str) and url.startswith(("https://", "http://")):
+                webbrowser.open(url)
+            self._popover.close()
+        elif action == "refresh":
+            self.startFetch_(None)
+        elif action == "quit":
+            NSApplication.sharedApplication().terminate_(None)
+        elif action == "height":
+            try:
+                h = float(body.get("value", 0))
+            except (TypeError, ValueError):
+                return
+            h = max(POPOVER_MIN_HEIGHT, min(POPOVER_MAX_HEIGHT, h))
+            self._popover.setContentSize_(NSMakeSize(POPOVER_WIDTH, h))
+        elif action == "saveSettings":
+            self._save_settings(body)
 
     @objc.python_method
     def _render(self, state: dict) -> None:
