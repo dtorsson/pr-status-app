@@ -267,7 +267,6 @@ class AppDelegate(NSObject):
         teammates = [
             str(t).strip() for t in (body.get("teammates") or []) if str(t).strip()
         ]
-        self._poll_interval = secs
         cfg = core.load_app_config()
         cfg["poll_interval_seconds"] = secs
         try:
@@ -276,6 +275,7 @@ class AppDelegate(NSObject):
         except OSError as e:
             self._push_js(f"window.settingsError({json.dumps(str(e))})")
             return
+        self._poll_interval = secs
         self._restart_timer()
         self.startFetch_(None)
 

@@ -14,14 +14,14 @@ OPTIONS = {
         "CFBundleName": "PR Status",
         "CFBundleDisplayName": "PR Status",
         "CFBundleIdentifier": "com.github.dtorsson.pr-status",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": "0.2.0",
+        "CFBundleShortVersionString": "0.2.0",
         "LSUIElement": True,
         "NSHumanReadableCopyright": "",
         "NSUserNotificationAlertStyle": "banner",
     },
-    "packages": ["rumps"],
-    "resources": ["pr-status"],
+    "includes": ["core"],
+    "resources": ["pr-status", "ui"],
 }
 
 setup(
