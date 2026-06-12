@@ -122,6 +122,7 @@ class AppDelegate(NSObject):
         self._restart_timer()
         self.startFetch_(None)
 
+    @objc.python_method
     def _install_fallback_menu(self, message: str) -> None:
         """Never leave the app unquittable: plain menu with error + Quit."""
         self._status_item.button().setTitle_("PR ⚠️")
@@ -136,6 +137,7 @@ class AppDelegate(NSObject):
         )
         self._status_item.setMenu_(menu)
 
+    @objc.python_method
     def _restart_timer(self) -> None:
         if self._timer is not None:
             self._timer.invalidate()
@@ -155,10 +157,77 @@ class AppDelegate(NSObject):
             button.bounds(), button, NSMinYEdge
         )
 
-    # ---------- fetch pipeline (Task 4 fills these in) ----------
+    # ---------- fetch pipeline ----------
 
     def startFetch_(self, _sender):
-        pass
+        if self._fetching:
+            return
+        self._fetching = True
+        self._push_js("window.setRefreshing(true)")
+        threading.Thread(target=self._fetch_worker, daemon=True).start()
+
+    @objc.python_method
+    def _fetch_worker(self) -> None:
+        """Runs on a background thread; never touch AppKit from here."""
+        try:
+            result = subprocess.run(
+                [str(core.script_path()), "--json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=core.SCRIPT_TIMEOUT_SECONDS,
+                check=True,
+                env=core.subprocess_env(),
+            )
+            data = json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            AppHelper.callAfter(
+                self._apply_error, f"Script failed (rc={e.returncode})", e.stderr or ""
+            )
+            return
+        except subprocess.TimeoutExpired:
+            AppHelper.callAfter(self._apply_error, "Script timeout", "")
+            return
+        except FileNotFoundError as e:
+            AppHelper.callAfter(self._apply_error, "Script not found", str(e))
+            return
+        except json.JSONDecodeError as e:
+            AppHelper.callAfter(self._apply_error, "Bad JSON from script", str(e))
+            return
+        AppHelper.callAfter(self._apply_data, data)
+
+    @objc.python_method
+    def _apply_data(self, data: dict) -> None:
+        self._fetching = False
+        self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        counts = data.get("counts", {})
+        self._status_item.button().setTitle_(
+            f"🔍 {counts.get('review', 0)}  🛠️ {counts.get('mine', 0)}"
+        )
+        state = core.build_state(
+            data,
+            last_refresh=self._last_refresh,
+            poll_interval=self._poll_interval,
+            teammates=core.load_pr_config()["teammates"],
+        )
+        self._render(state)
+        if not self._first_run:
+            for note in core.compute_notifications(
+                data, self._seen_review, self._seen_mine_reviews
+            ):
+                self._deliver_notification(note)
+        self._seen_review, self._seen_mine_reviews = core.update_seen(data)
+        self._first_run = False
+
+    @objc.python_method
+    def _apply_error(self, summary: str, detail: str) -> None:
+        self._fetching = False
+        self._status_item.button().setTitle_("PR ⚠️")
+        self._render(core.error_state(summary, detail))
+
+    @objc.python_method
+    def _deliver_notification(self, note: dict) -> None:
+        pass  # Task 6
 
     # ---------- JS bridge ----------
 
@@ -172,6 +241,7 @@ class AppDelegate(NSObject):
             self._ui_ready = True
             if self._last_state is not None:
                 self._render(self._last_state)
+        # Task 5 adds: openPR / refresh / quit / height / saveSettings
 
     @objc.python_method
     def _render(self, state: dict) -> None:
@@ -182,6 +252,7 @@ class AppDelegate(NSObject):
         webview = self._popover.contentViewController().view()
         webview.evaluateJavaScript_completionHandler_(js, None)
 
+    @objc.python_method
     def _push_js(self, js: str) -> None:
         if not self._ui_ready or self._popover is None:
             return
@@ -197,6 +268,7 @@ class AppDelegate(NSObject):
 def main() -> None:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    # NSApplication holds its delegate weakly; this local keeps it alive (runEventLoop never returns).
     delegate = AppDelegate.alloc().init()
     app.setDelegate_(delegate)
     AppHelper.runEventLoop()
@@ -204,14 +276,18 @@ def main() -> None:
 
 if __name__ == "__main__":
     if "--check" in sys.argv:
-        result = subprocess.run(
-            [str(core.script_path()), "--json"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=core.SCRIPT_TIMEOUT_SECONDS,
-            env=core.subprocess_env(),
-        )
+        try:
+            result = subprocess.run(
+                [str(core.script_path()), "--json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=core.SCRIPT_TIMEOUT_SECONDS,
+                env=core.subprocess_env(),
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            sys.stderr.write(f"error: {e}\n")
+            sys.exit(1)
         if result.returncode != 0:
             sys.stderr.write(result.stderr)
             sys.exit(result.returncode)
