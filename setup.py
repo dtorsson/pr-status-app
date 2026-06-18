@@ -22,6 +22,7 @@ OPTIONS = {
         "NSUserNotificationAlertStyle": "banner",
     },
     "includes": ["core"],
+    "excludes": ["tkinter", "_tkinter"],
     "resources": ["pr-status", "ui"],
 }
 
