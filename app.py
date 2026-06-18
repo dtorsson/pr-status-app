@@ -41,7 +41,7 @@ from WebKit import WKWebView, WKWebViewConfiguration
 
 import core
 
-POPOVER_WIDTH = 360
+POPOVER_WIDTH = 440
 POPOVER_MIN_HEIGHT = 200
 POPOVER_MAX_HEIGHT = 640
 
