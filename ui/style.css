@@ -15,7 +15,8 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body { background: var(--bg); }
+/* Transparent so the popover's behind-window blur material shows through. */
+html, body { background: transparent; }
 
 body {
   font: 13px/1.45 -apple-system, BlinkMacSystemFont, sans-serif;

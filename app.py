@@ -25,7 +25,15 @@ from AppKit import (
     NSPopoverBehaviorTransient,
     NSStatusBar,
     NSVariableStatusItemLength,
+    NSView,
     NSViewController,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
+    NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectMaterialPopover,
+    NSVisualEffectStateActive,
+    NSVisualEffectView,
+    NSWindowAbove,
 )
 from Foundation import (
     NSMakeRect,
@@ -61,16 +69,35 @@ class WebViewController(NSViewController):
         config.userContentController().addScriptMessageHandler_name_(
             self._bridge, "app"
         )
-        webview = WKWebView.alloc().initWithFrame_configuration_(
-            NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_MAX_HEIGHT), config
-        )
+        frame = NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_MAX_HEIGHT)
+        resize = NSViewWidthSizable | NSViewHeightSizable
+
+        # Behind-window blur backing so the transparent webview reveals a
+        # frosted, translucent popover instead of the opaque popover chrome.
+        container = NSView.alloc().initWithFrame_(frame)
+        effect = NSVisualEffectView.alloc().initWithFrame_(frame)
+        effect.setMaterial_(NSVisualEffectMaterialPopover)
+        effect.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        effect.setState_(NSVisualEffectStateActive)
+        effect.setAutoresizingMask_(resize)
+        container.addSubview_(effect)
+
+        webview = WKWebView.alloc().initWithFrame_configuration_(frame, config)
         webview.setValue_forKey_(False, "drawsBackground")
+        webview.setAutoresizingMask_(resize)
         ui = core.ui_path()
         webview.loadFileURL_allowingReadAccessToURL_(
             NSURL.fileURLWithPath_(str(ui / "index.html")),
             NSURL.fileURLWithPath_(str(ui)),
         )
-        self.setView_(webview)
+        container.addSubview_positioned_relativeTo_(webview, NSWindowAbove, effect)
+
+        self._webview = webview
+        self.setView_(container)
+
+    @objc.python_method
+    def webview(self):
+        return self._webview
 
 
 class AppDelegate(NSObject):
@@ -326,14 +353,14 @@ class AppDelegate(NSObject):
         if not self._ui_ready or self._popover is None:
             return
         js = f"window.render({json.dumps(state)})"
-        webview = self._popover.contentViewController().view()
+        webview = self._popover.contentViewController().webview()
         webview.evaluateJavaScript_completionHandler_(js, None)
 
     @objc.python_method
     def _push_js(self, js: str) -> None:
         if not self._ui_ready or self._popover is None:
             return
-        webview = self._popover.contentViewController().view()
+        webview = self._popover.contentViewController().webview()
         webview.evaluateJavaScript_completionHandler_(js, None)
 
     # ---------- notifications ----------
