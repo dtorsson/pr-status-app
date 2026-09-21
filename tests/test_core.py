@@ -152,3 +152,24 @@ def test_script_path_uses_resourcepath(monkeypatch, tmp_path):
     (tmp_path / "pr-status").write_text("#!/bin/bash\n")
     monkeypatch.setenv("RESOURCEPATH", str(tmp_path))
     assert core.script_path() == tmp_path / "pr-status"
+
+
+def test_subprocess_env_strips_py2app_openssl_vars(monkeypatch):
+    """py2app's __boot__ points SSL_CERT_FILE/DIR at a nonexistent file so the
+    bundled Python won't use stale CAs. Inherited by gh (Go >=1.25 honors them
+    on darwin) it empties the root pool -> 'certificate signed by unknown
+    authority'. They must not reach child processes."""
+    monkeypatch.setenv("SSL_CERT_FILE", "/Resources/openssl.ca/no-such-file")
+    monkeypatch.setenv("SSL_CERT_DIR", "/Resources/openssl.ca/no-such-file")
+    env = core.subprocess_env()
+    assert "SSL_CERT_FILE" not in env
+    assert "SSL_CERT_DIR" not in env
+
+
+def test_subprocess_env_keeps_real_openssl_overrides(monkeypatch, tmp_path):
+    """A CA bundle the user really set (corporate MITM root) must survive."""
+    bundle = tmp_path / "corp-ca.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    assert core.subprocess_env()["SSL_CERT_FILE"] == str(bundle)

@@ -128,6 +128,17 @@ def subprocess_env() -> dict[str, str]:
     extra_paths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
     existing = env.get("PATH", "")
     env["PATH"] = ":".join(extra_paths + ([existing] if existing else []))
+
+    # py2app's __boot__ sets SSL_CERT_FILE/SSL_CERT_DIR to a deliberately
+    # nonexistent path so the bundled Python can't fall back on stale CAs.
+    # Inheriting that poisons non-Python children: gh (Go >= 1.25 honors these
+    # on darwin) ends up with an empty root pool and every request dies with
+    # "x509: certificate signed by unknown authority". Drop them unless they
+    # point somewhere real — a user-set corporate CA bundle must survive.
+    for var in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        value = env.get(var)
+        if value and not os.path.exists(value):
+            del env[var]
     return env
 
 
