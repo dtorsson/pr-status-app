@@ -8,6 +8,8 @@ CONFIG="${HOME}/.config/pr-status/config"
 # Read config file
 CONFIG_ORGS=""
 MAX_AGE_DAYS=21
+EXCLUDE_REVIEW_AUTHORS=""      # comma list; case-insensitive substring of author login
+DIRECT_REVIEW_ONLY_REPOS=""    # comma list of repo or owner/repo; team-only requests hidden
 TEAMMATES=()
 if [ -f "$CONFIG" ]; then
   in_teammates=false
@@ -26,6 +28,10 @@ if [ -f "$CONFIG" ]; then
       CONFIG_ORGS="${line#orgs=}"
     elif [[ "$line" == max_age_days=* ]]; then
       MAX_AGE_DAYS="${line#max_age_days=}"
+    elif [[ "$line" == exclude_review_authors=* ]]; then
+      EXCLUDE_REVIEW_AUTHORS="${line#exclude_review_authors=}"
+    elif [[ "$line" == direct_review_only_repos=* ]]; then
+      DIRECT_REVIEW_ONLY_REPOS="${line#direct_review_only_repos=}"
     fi
   done < "$CONFIG"
 fi
@@ -228,6 +234,11 @@ fi
 # Union personal + team-tagged review requests, dedupe by repo+number.
 REVIEW_RAW=$(jq -n --argjson p "$REVIEW_PERSONAL" --argjson t "$TAGGED_RAW" '
   ($p + $t) | unique_by("\(.repository.nameWithOwner)#\(.number)")')
+# Drop review requests from excluded authors (e.g. dependency bots).
+REVIEW_RAW=$(echo "$REVIEW_RAW" | jq --arg ex "$EXCLUDE_REVIEW_AUTHORS" '
+  ($ex | ascii_downcase | split(",") | map(select(length > 0))) as $pats
+  | [.[] | select((.author.login // "" | ascii_downcase) as $a
+               | $pats | any(. as $p | $a | contains($p)) | not)]')
 MY_JSON=$(cat "$TMPDIR"/mine_*.json | jq -s 'add // []')
 TEAM_RAW="[]"
 if compgen -G "$TMPDIR/team_*.json" > /dev/null; then
@@ -278,9 +289,16 @@ while IFS=$'\t' read -r full_repo num; do
       note_error "requested reviewers ($full_repo#$num)" "$DIRECT_DIR/$RIDX.err"
       REQ_REVIEWERS='{}'
     fi
-    MATCH=$(echo "$REQ_REVIEWERS" | jq --arg me "$ME" --arg owner "$repo_owner" --argjson teams "$USER_TEAMS_JSON" '
-      ((.users // []) | any(.login == $me))
-      or ((.teams // []) | any(.slug as $s | $teams | any(.org == $owner and .slug == $s)))
+    # In direct-only repos a team request is not enough: the user must be
+    # requested by name.
+    MATCH=$(echo "$REQ_REVIEWERS" | jq --arg me "$ME" --arg owner "$repo_owner" --argjson teams "$USER_TEAMS_JSON" \
+      --arg repo "$full_repo" --arg direct "$DIRECT_REVIEW_ONLY_REPOS" '
+      ($direct | ascii_downcase | split(",") | map(select(length > 0))) as $d
+      | ($repo | ascii_downcase) as $r
+      | ($d | any(. == $r or . == ($r | split("/") | last))) as $direct_only
+      | ((.users // []) | any(.login == $me))
+        or (($direct_only | not)
+            and ((.teams // []) | any(.slug as $s | $teams | any(.org == $owner and .slug == $s))))
     ')
     if [ "$MATCH" = "true" ]; then
       CI=$(ci_rollup "$full_repo" "$num")

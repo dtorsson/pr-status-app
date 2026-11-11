@@ -49,12 +49,23 @@ first run:
 ```ini
 orgs=my-org,other-org
 max_age_days=21
+exclude_review_authors=renovate,dependabot
+direct_review_only_repos=deploy-repo
 
 [teammates]
 alice
 bob
 carol
 ```
+
+Optional review-queue filters:
+
+- `exclude_review_authors` — comma list; a review request is hidden when
+  the PR author's login contains any entry (case-insensitive), e.g.
+  `renovate` hides `my-org-renovate[bot]`.
+- `direct_review_only_repos` — comma list of `repo` or `owner/repo`. In
+  these repos a PR is listed only when you are requested by name;
+  requests that reach you only through a team are hidden.
 
 `max_age_days` controls how far back to look when fetching teammate PRs
 (default 21). The menubar app inherits this config — orgs and

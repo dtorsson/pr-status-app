@@ -25,16 +25,18 @@ case "$args" in
   "api user -q .login") echo me ;;
   "api /user/teams"*)
     [ -n "${GH_STUB_FAIL_TEAMS:-}" ] && { echo "HTTP 502: bad gateway" >&2; exit 1; }
-    echo "[]" ;;
+    echo "${GH_STUB_TEAMS:-[]}" ;;
   "search prs"*)
     [ -n "${GH_STUB_FAIL_SEARCH:-}" ] && { echo "HTTP 403: API rate limit exceeded" >&2; exit 1; }
     case "$args" in *"--author=ghost"*) echo 'Invalid search query "author:ghost".' >&2; exit 1 ;; esac
     case "$args" in
       *"--jq"*) echo '["o/r"]' ;;
+      *"--review-requested=me"*) echo "${GH_STUB_REVIEW:-[]}" ;;
       *"--author=me"*"--state=open"*) echo "[$PR]" ;;
       *) echo "[]" ;;
     esac ;;
   "api repos/o/r --jq .archived") echo false ;;
+  "api repos/o/r/pulls/"*"/requested_reviewers") echo "${GH_STUB_REQ:-{\}}" ;;
   "pr view"*"--json reviews"*)
     [ -n "${GH_STUB_FAIL_REVIEWS:-}" ] && { echo "HTTP 500" >&2; exit 1; }
     echo "[]" ;;
@@ -127,3 +129,59 @@ def test_unsearchable_teammate_is_skipped_not_fatal(tmp_path):
     data = json.loads(result.stdout)
     assert data["counts"] == {"review": 0, "mine": 1, "team": 0}
     assert "ghost" in result.stderr
+
+
+def review_pr(number, author):
+    return {
+        "repository": {"name": "r", "nameWithOwner": "o/r"},
+        "number": number,
+        "title": f"pr {number}",
+        "author": {"login": author},
+        "createdAt": "2026-01-01T00:00:00Z",
+        "url": f"https://example.test/{number}",
+    }
+
+
+REQ_DIRECT = json.dumps({"users": [{"login": "me"}], "teams": []})
+REQ_TEAM_ONLY = json.dumps({"users": [], "teams": [{"slug": "t"}]})
+MY_TEAMS = json.dumps([{"org": "o", "slug": "t"}])
+
+
+def review_numbers(tmp_path, config, prs, req, teams="[]"):
+    result = run_script(
+        tmp_path, [CHECK_OK], config=config,
+        GH_STUB_REVIEW=json.dumps(prs), GH_STUB_REQ=req, GH_STUB_TEAMS=teams,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    numbers = sorted(pr["number"] for pr in data["review"])
+    assert data["counts"]["review"] == len(numbers)
+    return numbers
+
+
+def test_review_requests_listed_by_default(tmp_path):
+    prs = [review_pr(2, "alice"), review_pr(3, "kognic-renovate[bot]")]
+    assert review_numbers(tmp_path, "orgs=o\n", prs, REQ_DIRECT) == [2, 3]
+
+
+def test_exclude_review_authors_drops_matching_logins(tmp_path):
+    prs = [review_pr(2, "alice"), review_pr(3, "kognic-renovate[bot]")]
+    config = "orgs=o\nexclude_review_authors=Renovate, dependabot\n"
+    assert review_numbers(tmp_path, config, prs, REQ_DIRECT) == [2]
+
+
+def test_team_request_listed_without_direct_only(tmp_path):
+    prs = [review_pr(2, "alice")]
+    assert review_numbers(tmp_path, "orgs=o\n", prs, REQ_TEAM_ONLY, MY_TEAMS) == [2]
+
+
+def test_direct_only_repo_drops_team_only_requests(tmp_path):
+    prs = [review_pr(2, "alice")]
+    config = "orgs=o\ndirect_review_only_repos=other,r\n"
+    assert review_numbers(tmp_path, config, prs, REQ_TEAM_ONLY, MY_TEAMS) == []
+
+
+def test_direct_only_repo_keeps_direct_requests(tmp_path):
+    prs = [review_pr(2, "alice")]
+    config = "orgs=o\ndirect_review_only_repos=o/r\n"
+    assert review_numbers(tmp_path, config, prs, REQ_DIRECT, MY_TEAMS) == [2]
