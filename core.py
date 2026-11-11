@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 
 DEFAULT_POLL_INTERVAL = 300
+# One run makes ~20+ searches; GitHub's search API allows 30 per minute.
+MIN_POLL_INTERVAL = 60
 SCRIPT_TIMEOUT_SECONDS = 120
 
 CONFIG_DIR = Path.home() / ".config" / "pr-status"

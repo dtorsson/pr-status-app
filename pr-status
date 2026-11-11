@@ -85,12 +85,22 @@ divider() {
 }
 ci_rollup() {
   # Print one of: success | failure | pending | none
+  # CheckRun entries carry status/conclusion; StatusContext (commit status)
+  # entries carry only state. A failed lookup degrades to "none".
   local repo="$1" num="$2"
-  gh pr view "$num" --repo "$repo" --json statusCheckRollup --jq '
-    .statusCheckRollup
+  gh pr view "$num" --repo "$repo" --json statusCheckRollup 2>/dev/null | jq -r '
+    (.statusCheckRollup // [])
     | if length == 0 then "none"
-      elif any(.[]; .conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE") then "failure"
-      elif any(.[]; .status == "IN_PROGRESS" or .status == "QUEUED" or .status == "PENDING" or .status == "WAITING") then "pending"
+      elif any(.[];
+          (.conclusion // "") as $c | (.state // "") as $s
+          | $c == "FAILURE" or $c == "TIMED_OUT" or $c == "ACTION_REQUIRED"
+            or $c == "STARTUP_FAILURE" or $c == "CANCELLED"
+            or $s == "FAILURE" or $s == "ERROR") then "failure"
+      elif any(.[];
+          (.status // "") as $st | (.state // "") as $s
+          | $st == "IN_PROGRESS" or $st == "QUEUED" or $st == "PENDING"
+            or $st == "WAITING" or $st == "REQUESTED"
+            or $s == "PENDING" or $s == "EXPECTED") then "pending"
       else "success" end
   ' 2>/dev/null || echo "none"
 }
@@ -107,6 +117,45 @@ IFS=',' read -ra ORG_LIST <<< "$ORGS"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# A failed GitHub call must not masquerade as "nothing to show" (a rate-limited
+# search would otherwise render as "All clear"). Failures are recorded here —
+# from background subshells too — and abort the run at the next check_errors.
+ERR_DIR="$TMPDIR/errors"; mkdir -p "$ERR_DIR"
+note_error() {
+  # note_error <label> <stderr-file>
+  local f
+  f=$(mktemp "$ERR_DIR/XXXXXX")
+  printf '%s: %s\n' "$1" "$(head -n 1 "$2" 2>/dev/null | cut -c1-160)" > "$f"
+}
+gh_json() {
+  # gh_json <outfile> <label> <gh args...> — write JSON to outfile, record failure.
+  local out="$1" label="$2"; shift 2
+  if ! gh "$@" > "$out" 2> "$out.err"; then
+    note_error "$label" "$out.err"
+    echo "[]" > "$out"
+  fi
+}
+gh_json_teammate() {
+  # Like gh_json, but a query GitHub rejects (unknown login, or a user whose
+  # PRs we cannot see) only skips that teammate instead of failing the run.
+  local out="$1" label="$2"; shift 2
+  if ! gh "$@" > "$out" 2> "$out.err"; then
+    if grep -q "Invalid search query" "$out.err"; then
+      echo "pr-status: skipping — $label: GitHub rejected the search" >&2
+    else
+      note_error "$label" "$out.err"
+    fi
+    echo "[]" > "$out"
+  fi
+}
+check_errors() {
+  if compgen -G "$ERR_DIR/*" > /dev/null; then
+    echo "GitHub request failed — results would be incomplete:" >&2
+    cat "$ERR_DIR"/* | sort -u | head -n 4 >&2
+    exit 1
+  fi
+}
+
 # Compute cutoff date for team stale filter
 if [ ${#TEAMMATES[@]} -gt 0 ]; then
   if command -v gdate &>/dev/null; then
@@ -118,36 +167,38 @@ fi
 
 # Discover teams user is member of, scoped to ORG_LIST.
 # Format: [{"org": "...", "slug": "..."}]
-USER_TEAMS_JSON=$(gh api /user/teams --paginate \
-  --jq '[.[] | {org: .organization.login, slug: .slug}]' 2>/dev/null || echo "[]")
-USER_TEAMS_JSON=$(echo "$USER_TEAMS_JSON" | jq --argjson orgs "$(printf '%s\n' "${ORG_LIST[@]}" | jq -R . | jq -s .)" \
+gh_json "$TMPDIR/user_teams.json" "list teams" api /user/teams --paginate \
+  --jq '[.[] | {org: .organization.login, slug: .slug}]'
+check_errors
+# --paginate emits one array per page; slurp and merge.
+USER_TEAMS_JSON=$(jq -s 'add // []' "$TMPDIR/user_teams.json" | jq --argjson orgs "$(printf '%s\n' "${ORG_LIST[@]}" | jq -R . | jq -s .)" \
   '[.[] | select(.org as $o | $orgs | any(. == $o))]')
 
 # ── Phase 1: fire all top-level fetches in parallel ─────
 for org in "${ORG_LIST[@]}"; do
-  (gh search prs --author="$ME" --owner="$org" --limit=100 \
-    --json repository --jq '[.[].repository.nameWithOwner] | unique' 2>/dev/null \
-    || echo "[]") > "$TMPDIR/active_${org}.json" &
+  gh_json "$TMPDIR/active_${org}.json" "search authored ($org)" \
+    search prs --author="$ME" --owner="$org" --limit=100 \
+    --json repository --jq '[.[].repository.nameWithOwner] | unique' &
 
-  (gh search prs --review-requested="$ME" --owner="$org" --state=open \
+  gh_json "$TMPDIR/review_${org}.json" "search review requests ($org)" \
+    search prs --review-requested="$ME" --owner="$org" --state=open \
     --sort=updated --limit=30 \
-    --json repository,number,title,author,createdAt,url 2>/dev/null \
-    || echo "[]") > "$TMPDIR/review_${org}.json" &
+    --json repository,number,title,author,createdAt,url &
 
-  (gh search prs --author="$ME" --owner="$org" --state=open \
+  gh_json "$TMPDIR/mine_${org}.json" "search open PRs ($org)" \
+    search prs --author="$ME" --owner="$org" --state=open \
     --sort=updated --limit=30 \
-    --json repository,number,title,updatedAt,url 2>/dev/null \
-    || echo "[]") > "$TMPDIR/mine_${org}.json" &
+    --json repository,number,title,updatedAt,url &
 done
 
 # Team-tagged review requests: one search per (org, team) pair user belongs to.
 while IFS=$'\t' read -r torg tslug; do
   [ -z "$torg" ] && continue
   safe="${torg//[^A-Za-z0-9]/_}__${tslug//[^A-Za-z0-9]/_}"
-  (gh search prs --team-review-requested="${torg}/${tslug}" --owner="$torg" --state=open \
+  gh_json "$TMPDIR/tagged_${safe}.json" "search team review requests (${torg}/${tslug})" \
+    search prs "team-review-requested:${torg}/${tslug}" --owner="$torg" --state=open \
     --sort=updated --limit=30 \
-    --json repository,number,title,author,createdAt,url 2>/dev/null \
-    || echo "[]") > "$TMPDIR/tagged_${safe}.json" &
+    --json repository,number,title,author,createdAt,url &
 done < <(echo "$USER_TEAMS_JSON" | jq -r '.[] | "\(.org)\t\(.slug)"')
 
 if [ ${#TEAMMATES[@]} -gt 0 ]; then
@@ -155,15 +206,16 @@ if [ ${#TEAMMATES[@]} -gt 0 ]; then
   for teammate in "${TEAMMATES[@]}"; do
     for org in "${ORG_LIST[@]}"; do
       ti=$((ti+1))
-      (gh search prs --author="$teammate" --owner="$org" --state=open \
+      gh_json_teammate "$TMPDIR/team_$(printf '%03d' $ti).json" "search PRs by @${teammate} ($org)" \
+        search prs --author="$teammate" --owner="$org" --state=open \
         --sort=updated --updated=">=${CUTOFF}" --limit=3 \
-        --json repository,number,title,author,createdAt,url 2>/dev/null \
-        || echo "[]") > "$TMPDIR/team_$(printf '%03d' $ti).json" &
+        --json repository,number,title,author,createdAt,url &
     done
   done
 fi
 
 wait
+check_errors
 
 # ── Combine phase 1 results ─────────────────────────────
 ACTIVE_REPOS=$(cat "$TMPDIR"/active_*.json | jq -s 'add // [] | unique')
@@ -222,7 +274,10 @@ while IFS=$'\t' read -r full_repo num; do
   RIDX=$(printf '%03d' "$ri")
   (
     repo_owner="${full_repo%%/*}"
-    REQ_REVIEWERS=$(gh api "repos/$full_repo/pulls/$num/requested_reviewers" 2>/dev/null || echo '{}')
+    if ! REQ_REVIEWERS=$(gh api "repos/$full_repo/pulls/$num/requested_reviewers" 2>"$DIRECT_DIR/$RIDX.err"); then
+      note_error "requested reviewers ($full_repo#$num)" "$DIRECT_DIR/$RIDX.err"
+      REQ_REVIEWERS='{}'
+    fi
     MATCH=$(echo "$REQ_REVIEWERS" | jq --arg me "$ME" --arg owner "$repo_owner" --argjson teams "$USER_TEAMS_JSON" '
       ((.users // []) | any(.login == $me))
       or ((.teams // []) | any(.slug as $s | $teams | any(.org == $owner and .slug == $s)))
@@ -243,8 +298,11 @@ while IFS=$'\t' read -r full_repo num; do
   mi=$((mi+1))
   MIDX=$(printf '%03d' "$mi")
   (
-    REVIEWS=$(gh pr view "$num" --repo "$full_repo" --json reviews \
-      --jq '[.reviews[] | select(.state != "DISMISSED" and .state != "PENDING") | {author: .author.login, state: .state, at: .submittedAt}] | sort_by(.at) | reverse | unique_by(.author)' 2>/dev/null || echo "[]")
+    if ! REVIEWS=$(gh pr view "$num" --repo "$full_repo" --json reviews \
+      --jq '[.reviews[] | select(.state != "DISMISSED" and .state != "PENDING") | {author: .author.login, state: .state, at: .submittedAt}] | sort_by(.at) | reverse | unique_by(.author)' 2>"$MINE_DIR/$MIDX.err"); then
+      note_error "reviews ($full_repo#$num)" "$MINE_DIR/$MIDX.err"
+      REVIEWS="[]"
+    fi
     CI=$(ci_rollup "$full_repo" "$num")
     echo "$MY_JSON" | jq --arg repo "$full_repo" --argjson num "$num" --argjson reviews "$REVIEWS" --arg ci "$CI" \
       '.[] | select(.repository.nameWithOwner == $repo and .number == $num) | . + {reviews: $reviews, ci_status: $ci}' \
@@ -267,6 +325,7 @@ while IFS=$'\t' read -r full_repo num; do
 done < <(echo "$TEAM_RAW" | jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"')
 
 wait
+check_errors
 
 # ── Combine phase 2 results ─────────────────────────────
 if compgen -G "$DIRECT_DIR/*.json" > /dev/null; then

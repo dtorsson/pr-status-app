@@ -255,7 +255,7 @@ function saveSettings() {
     try { secs = parseInterval(custom); }
     catch (e) { return showSettingsError(e.message); }
   }
-  if (secs < 10) return showSettingsError("Minimum 10s to avoid GitHub rate limits.");
+  if (secs < 60) return showSettingsError("Minimum 1m — GitHub allows 30 searches per minute.");
   const teammates = $("teammates").value
     .split(/[\n,]/).map((t) => t.trim()).filter(Boolean);
   post({ action: "saveSettings", poll_interval_seconds: secs, teammates });

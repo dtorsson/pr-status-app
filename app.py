@@ -117,7 +117,7 @@ class AppDelegate(NSObject):
         cfg = core.load_app_config()
         try:
             self._poll_interval = max(
-                10, int(cfg.get("poll_interval_seconds", core.DEFAULT_POLL_INTERVAL))
+                core.MIN_POLL_INTERVAL, int(cfg.get("poll_interval_seconds", core.DEFAULT_POLL_INTERVAL))
             )
         except (TypeError, ValueError):
             self._poll_interval = core.DEFAULT_POLL_INTERVAL
@@ -295,7 +295,7 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _save_settings(self, body) -> None:
         try:
-            secs = max(10, int(body.get("poll_interval_seconds", self._poll_interval)))
+            secs = max(core.MIN_POLL_INTERVAL, int(body.get("poll_interval_seconds", self._poll_interval)))
         except (TypeError, ValueError):
             secs = self._poll_interval
         teammates = [
